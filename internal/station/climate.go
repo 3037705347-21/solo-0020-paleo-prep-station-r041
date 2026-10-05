@@ -64,7 +64,12 @@ func (s *Service) RecordClimateReading(
 	if err != nil {
 		return ClimateReadingResult{}, err
 	}
-	if err := s.repo.Read(func(m *repository.Mutation) error {
+
+	// Calibration checks and excursion creation commit in one transaction so
+	// a concurrent release decision always sees the same safety facts.
+	result := ClimateReadingResult{Reading: reading}
+	var excursion *domain.ClimateExcursion
+	err = s.repo.Mutate(func(m *repository.Mutation) error {
 		if _, ok := m.GetSpecimen(specimenID); !ok {
 			return notFoundSpecimen(specimenID)
 		}
@@ -75,20 +80,12 @@ func (s *Service) RecordClimateReading(
 		if !calibration.ValidAt(now) {
 			return contracts.Conflict("climate_calibration_expired", "探头校准已经失效")
 		}
-		return nil
-	}); err != nil {
-		return ClimateReadingResult{}, err
-	}
-
-	result := ClimateReadingResult{Reading: reading}
-	if reading.IsWithinLimits() {
-		return result, nil
-	}
-
-	var excursion domain.ClimateExcursion
-	err = s.repo.Mutate(func(m *repository.Mutation) error {
+		if reading.IsWithinLimits() {
+			return nil
+		}
 		if existing, ok := m.FindOpenClimateExcursion(specimenID); ok {
-			excursion = existing
+			found := existing
+			excursion = &found
 			return nil
 		}
 		created, err := domain.NewClimateExcursion(
@@ -101,23 +98,13 @@ func (s *Service) RecordClimateReading(
 			return err
 		}
 		m.PutClimateExcursion(created)
-		excursion = created
+		excursion = &created
 		return nil
 	})
 	if err != nil {
 		return ClimateReadingResult{}, err
 	}
-
-	// The hold index is refreshed separately so release can make its gate
-	// decision without scanning the full excursion history.
-	err = s.repo.Mutate(func(m *repository.Mutation) error {
-		m.SetClimateHold(specimenID, excursion.ID)
-		return nil
-	})
-	if err != nil {
-		return ClimateReadingResult{}, err
-	}
-	result.Excursion = &excursion
+	result.Excursion = excursion
 	return result, nil
 }
 
@@ -159,17 +146,19 @@ func (s *Service) ResolveClimateExcursion(
 		if !reading.IsWithinLimits() {
 			return contracts.Conflict("climate_reading_out_of_range", "当前读数仍超出允许范围")
 		}
-		if _, ok := m.GetCalibration(reading.SensorID, reading.CellID); !ok {
+		calibration, ok := m.GetCalibration(reading.SensorID, reading.CellID)
+		if !ok {
 			return notFoundCalibration(reading.SensorID, reading.CellID)
+		}
+		if !calibration.ValidAt(now) {
+			return contracts.Conflict("climate_calibration_expired", "探头校准已经失效")
 		}
 		completed, err := excursion.WithResolution(request.ResolvedBy, now)
 		if err != nil {
 			return err
 		}
-		_ = completed
-		m.PutClimateExcursion(excursion)
-		m.ClearClimateHold(excursion.SpecimenID)
-		resolved = excursion
+		m.PutClimateExcursion(completed)
+		resolved = completed
 		return nil
 	})
 	return resolved, err

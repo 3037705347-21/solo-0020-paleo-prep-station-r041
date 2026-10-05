@@ -14,7 +14,6 @@ type state struct {
 	releases     map[string]domain.ReleaseRecord
 	calibrations map[string]domain.SensorCalibration
 	excursions   map[string]domain.ClimateExcursion
-	climateHolds map[string]string
 }
 
 type MemoryRepository struct {
@@ -31,7 +30,6 @@ func NewMemory() *MemoryRepository {
 			releases:     make(map[string]domain.ReleaseRecord),
 			calibrations: make(map[string]domain.SensorCalibration),
 			excursions:   make(map[string]domain.ClimateExcursion),
-			climateHolds: make(map[string]string),
 		},
 	}
 }
@@ -62,7 +60,6 @@ func cloneMutation(source state) *Mutation {
 		releases:     make(map[string]domain.ReleaseRecord, len(source.releases)),
 		calibrations: make(map[string]domain.SensorCalibration, len(source.calibrations)),
 		excursions:   make(map[string]domain.ClimateExcursion, len(source.excursions)),
-		climateHolds: make(map[string]string, len(source.climateHolds)),
 	}
 	for key, value := range source.specimens {
 		copied.specimens[key] = value
@@ -81,9 +78,6 @@ func cloneMutation(source state) *Mutation {
 	}
 	for key, value := range source.excursions {
 		copied.excursions[key] = value
-	}
-	for key, value := range source.climateHolds {
-		copied.climateHolds[key] = value
 	}
 	return &Mutation{state: copied}
 }
@@ -235,17 +229,4 @@ func (m *Mutation) ListClimateExcursions(specimenID string) []domain.ClimateExcu
 		return values[i].OpenedAt.Before(values[j].OpenedAt)
 	})
 	return values
-}
-
-func (m *Mutation) HasClimateHold(specimenID string) bool {
-	_, ok := m.state.climateHolds[specimenID]
-	return ok
-}
-
-func (m *Mutation) SetClimateHold(specimenID, excursionID string) {
-	m.state.climateHolds[specimenID] = excursionID
-}
-
-func (m *Mutation) ClearClimateHold(specimenID string) {
-	delete(m.state.climateHolds, specimenID)
 }
