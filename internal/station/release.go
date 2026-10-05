@@ -17,29 +17,26 @@ func (s *Service) ReleaseSpecimen(
 		return domain.ReleaseRecord{}, err
 	}
 
-	if err := s.repo.Read(func(m *repository.Mutation) error {
-		if m.HasClimateHold(specimenID) {
-			return contracts.Conflict(
-				"climate_risk_blocks_release",
-				"存在未解除的环境偏离，不能办理研究放行",
-			)
-		}
-		return nil
-	}); err != nil {
-		return domain.ReleaseRecord{}, err
-	}
-
 	var created domain.ReleaseRecord
 	err := s.repo.Mutate(func(m *repository.Mutation) error {
 		specimen, ok := m.GetSpecimen(specimenID)
 		if !ok {
 			return notFoundSpecimen(specimenID)
 		}
-		if m.HasOpenPlan(specimenID) {
-			return contracts.Conflict("open_plan_blocks_release", "存在未结束方案，不能办理研究放行")
-		}
 		if _, exists := m.ReleaseForSpecimen(specimenID); exists {
 			return contracts.Conflict("release_exists", "该标本已经存在放行记录")
+		}
+		// The climate gate must be evaluated in the same mutation that
+		// writes the release, otherwise a concurrently registered
+		// excursion can slip between the check and the commit.
+		if m.HasClimateHold(specimenID) {
+			return contracts.Conflict(
+				"climate_risk_blocks_release",
+				"存在未解除的环境偏离，不能办理研究放行",
+			)
+		}
+		if m.HasOpenPlan(specimenID) {
+			return contracts.Conflict("open_plan_blocks_release", "存在未结束方案，不能办理研究放行")
 		}
 		record, err := domain.NewReleaseRecord(
 			s.nextID("release"),

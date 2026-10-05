@@ -85,32 +85,26 @@ func (s *Service) RecordClimateReading(
 		return result, nil
 	}
 
+	// The excursion record and the hold index describe the same safety
+	// fact, so they commit in a single mutation: release must never
+	// observe one without the other.
 	var excursion domain.ClimateExcursion
 	err = s.repo.Mutate(func(m *repository.Mutation) error {
 		if existing, ok := m.FindOpenClimateExcursion(specimenID); ok {
 			excursion = existing
-			return nil
+		} else {
+			created, err := domain.NewClimateExcursion(
+				s.nextID("climate-excursion"),
+				specimenID,
+				reading,
+				now,
+			)
+			if err != nil {
+				return err
+			}
+			m.PutClimateExcursion(created)
+			excursion = created
 		}
-		created, err := domain.NewClimateExcursion(
-			s.nextID("climate-excursion"),
-			specimenID,
-			reading,
-			now,
-		)
-		if err != nil {
-			return err
-		}
-		m.PutClimateExcursion(created)
-		excursion = created
-		return nil
-	})
-	if err != nil {
-		return ClimateReadingResult{}, err
-	}
-
-	// The hold index is refreshed separately so release can make its gate
-	// decision without scanning the full excursion history.
-	err = s.repo.Mutate(func(m *repository.Mutation) error {
 		m.SetClimateHold(specimenID, excursion.ID)
 		return nil
 	})
@@ -159,17 +153,20 @@ func (s *Service) ResolveClimateExcursion(
 		if !reading.IsWithinLimits() {
 			return contracts.Conflict("climate_reading_out_of_range", "当前读数仍超出允许范围")
 		}
-		if _, ok := m.GetCalibration(reading.SensorID, reading.CellID); !ok {
+		calibration, ok := m.GetCalibration(reading.SensorID, reading.CellID)
+		if !ok {
 			return notFoundCalibration(reading.SensorID, reading.CellID)
+		}
+		if !calibration.ValidAt(now) {
+			return contracts.Conflict("climate_calibration_expired", "探头校准已经失效")
 		}
 		completed, err := excursion.WithResolution(request.ResolvedBy, now)
 		if err != nil {
 			return err
 		}
-		_ = completed
-		m.PutClimateExcursion(excursion)
+		m.PutClimateExcursion(completed)
 		m.ClearClimateHold(excursion.SpecimenID)
-		resolved = excursion
+		resolved = completed
 		return nil
 	})
 	return resolved, err
